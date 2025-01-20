@@ -32,3 +32,115 @@ flag:
 ```sh
 go run github.com/jtarchie/semtype -dir ./path/to/your/module -state ./path/to/state/file.dat
 ```
+
+## Versioning Rules
+
+`semtype` follows semantic versioning rules to determine whether a change is a
+patch, minor, or major update based on the changes to the exported types and
+functions in a Go module.
+
+### Patch Version
+
+A patch version is incremented when backward-compatible bug fixes are made.
+Examples include:
+
+- Fixing a bug in an existing function without changing its signature.
+
+```go
+// Before
+func Add(a, b int) int {
+    return a + b
+}
+
+// After
+func Add(a, b int) int {
+    if a == 0 {
+        return b
+    }
+    return a + b
+}
+```
+
+### Minor Version
+
+A minor version is incremented when new, backward-compatible functionality is
+added. Examples include:
+
+- Adding a new function or method.
+
+```go
+// Before
+package math
+
+// After
+package math
+
+// New function added
+func Subtract(a, b int) int {
+    return a - b
+}
+```
+
+- Adding a new field to a struct without removing or changing existing fields.
+
+```go
+// Before
+type Point struct {
+    X int
+    Y int
+}
+
+// After
+type Point struct {
+    X int
+    Y int
+    Z int // New field added
+}
+```
+
+### Major Version
+
+A major version is incremented when there are changes that are not
+backward-compatible. Examples include:
+
+- Changing the signature of an existing function.
+
+```go
+// Before
+func Add(a, b int) int {
+    return a + b
+}
+
+// After
+func Add(a, b, c int) int { // Function signature changed
+    return a + b + c
+}
+```
+
+- Removing an existing function or method.
+
+```go
+// Before
+func Multiply(a, b int) int {
+    return a * b
+}
+
+// After
+// Multiply function removed
+```
+
+- Changing the type of an existing field in a struct.
+
+```go
+// Before
+type Point struct {
+    X int
+    Y int
+}
+
+// After
+type Point struct {
+    X float64 // Field type changed
+    Y int
+}
+```
