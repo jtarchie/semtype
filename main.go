@@ -33,40 +33,28 @@ func main() {
 		*stateFile = filepath.Join(*dir, "semtype.dat")
 	}
 
-	previousState := loadPreviousState(*stateFile)
-	currentExported := analyzeDirectory(*dir)
-	newVersion := determineVersion(previousState, currentExported)
-	saveCurrentState(*stateFile, newVersion, currentExported)
-	fmt.Printf("New version: %s\n", newVersion)
-}
-
-func loadPreviousState(filename string) State {
-	file, err := os.Open(filename)
+	file, err := os.Open(*stateFile)
+	var previousState State
 	if err != nil {
 		if os.IsNotExist(err) {
-			return State{Version: "0.0.0"}
+			previousState = State{Version: "0.0.0"}
+		} else {
+			log.Fatalf("failed to open state file: %v", err)
 		}
-
-		log.Fatalf("failed to open state file: %v", err)
-	}
-	defer file.Close()
-
-	var state State
-	decoder := gob.NewDecoder(file)
-	if err := decoder.Decode(&state); err != nil {
-		log.Fatalf("failed to decode state file: %v", err)
+	} else {
+		defer file.Close()
+		decoder := gob.NewDecoder(file)
+		if err := decoder.Decode(&previousState); err != nil {
+			log.Fatalf("failed to decode state file: %v", err)
+		}
 	}
 
-	return state
-}
-
-func analyzeDirectory(dir string) Exported {
 	exported := Exported{
 		Types:     make(map[string]string),
 		Functions: make(map[string]string),
 	}
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, nil, parser.AllErrors)
+	pkgs, err := parser.ParseDir(fset, *dir, nil, parser.AllErrors)
 	if err != nil {
 		log.Fatalf("Failed to parse directory: %v", err)
 	}
@@ -79,8 +67,20 @@ func analyzeDirectory(dir string) Exported {
 						switch s := spec.(type) {
 						case *ast.TypeSpec:
 							if s.Name.IsExported() {
+								// Create a simplified version of the type
+								var simplifiedType ast.Node
+								switch t := s.Type.(type) {
+								case *ast.StructType:
+									// Create new struct type without field details
+									simplifiedType = &ast.StructType{
+										Fields: &ast.FieldList{},
+									}
+								default:
+									simplifiedType = t
+								}
+
 								printer := &bytes.Buffer{}
-								if err := format.Node(printer, fset, s.Type); err != nil {
+								if err := format.Node(printer, fset, simplifiedType); err != nil {
 									log.Printf("Failed to format type %s: %v", s.Name.Name, err)
 									continue
 								}
@@ -101,44 +101,45 @@ func analyzeDirectory(dir string) Exported {
 			}
 		}
 	}
-	return exported
-}
 
-func determineVersion(previous State, current Exported) string {
 	major, minor, patch := 0, 0, 0
-	fmt.Sscanf(previous.Version, "%d.%d.%d", &major, &minor, &patch)
+	_, err = fmt.Sscanf(previousState.Version, "%d.%d.%d", &major, &minor, &patch)
+	if err != nil {
+		log.Fatalf("failed to parse version: %v", err)
+	}
 
 	removed := false
 	added := false
-	changed := false
 
-	for name, typ := range previous.Exported.Types {
-		if currentType, ok := current.Types[name]; !ok || currentType != typ {
+	for name, typ := range previousState.Exported.Types {
+		if currentType, ok := exported.Types[name]; !ok || currentType != typ {
 			removed = true
-			break
+			goto bump
 		}
 	}
 
-	for name, typ := range current.Types {
-		if previousType, ok := previous.Exported.Types[name]; !ok || previousType != typ {
+	for name, typ := range exported.Types {
+		if previousType, ok := previousState.Exported.Types[name]; !ok || previousType != typ {
 			added = true
-			break
+			goto bump
 		}
 	}
 
-	for name, typ := range previous.Exported.Functions {
-		if currentFunc, ok := current.Functions[name]; !ok || currentFunc != typ {
+	for name, typ := range previousState.Exported.Functions {
+		if currentFunc, ok := exported.Functions[name]; !ok || currentFunc != typ {
 			removed = true
-			break
+			goto bump
 		}
 	}
 
-	for name, typ := range current.Functions {
-		if previousFunc, ok := previous.Exported.Functions[name]; !ok || previousFunc != typ {
+	for name, typ := range exported.Functions {
+		if previousFunc, ok := previousState.Exported.Functions[name]; !ok || previousFunc != typ {
 			added = true
-			break
+			goto bump
 		}
 	}
+
+bump:
 
 	if removed {
 		major++
@@ -147,22 +148,20 @@ func determineVersion(previous State, current Exported) string {
 	} else if added {
 		minor++
 		patch = 0
-	} else if changed {
+	} else {
 		patch++
 	}
 
-	return fmt.Sprintf("%d.%d.%d", major, minor, patch)
-}
+	newVersion := fmt.Sprintf("%d.%d.%d", major, minor, patch)
 
-func saveCurrentState(filename, version string, exported Exported) {
-	file, err := os.Create(filename)
+	file, err = os.Create(*stateFile)
 	if err != nil {
 		log.Fatalf("failed to create state file: %v", err)
 	}
 	defer file.Close()
 
 	state := State{
-		Version:  version,
+		Version:  newVersion,
 		Exported: exported,
 	}
 
@@ -170,4 +169,6 @@ func saveCurrentState(filename, version string, exported Exported) {
 	if err := encoder.Encode(&state); err != nil {
 		log.Fatalf("failed to encode state file: %v", err)
 	}
+
+	fmt.Printf("New version: %s\n", newVersion)
 }
