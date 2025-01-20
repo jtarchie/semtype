@@ -18,6 +18,8 @@ type testpair struct {
 
 	afterFiles   map[string]string
 	afterVersion string
+
+	name string
 }
 
 func TestMain(t *testing.T) {
@@ -27,12 +29,14 @@ func TestMain(t *testing.T) {
 
 	tests := []testpair{
 		{
+			name:          "empty directory",
 			beforeFiles:   map[string]string{},
 			beforeVersion: "0.0.1",
 			afterFiles:    map[string]string{},
 			afterVersion:  "0.0.2",
 		},
 		{
+			name: "no changes to struct",
 			beforeFiles: map[string]string{
 				"test.go": "package main\ntype Test struct{}",
 			},
@@ -42,14 +46,47 @@ func TestMain(t *testing.T) {
 			},
 			afterVersion: "0.1.1",
 		},
+		{
+			name: "add unexported field",
+			beforeFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{}",
+			},
+			beforeVersion: "0.1.0",
+			afterFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{name string}",
+			},
+			afterVersion: "0.1.1",
+		},
+		{
+			name: "add additional field to struct",
+			beforeFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{Name string}",
+			},
+			beforeVersion: "0.1.0",
+			afterFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{Name string; age int}",
+			},
+			afterVersion: "0.1.1",
+		},
+		{
+			name: "add exported field",
+			beforeFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{}",
+			},
+			beforeVersion: "0.1.0",
+			afterFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{Name string}",
+			},
+			afterVersion: "1.0.0",
+		},
 	}
 
 	path, err := gexec.Build("github.com/jtarchie/semtype")
 	assert.Expect(err).NotTo(HaveOccurred())
 	defer gexec.CleanupBuildArtifacts()
 
-	for index, test := range tests {
-		t.Run(fmt.Sprintf("test %d", index), func(t *testing.T) {
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
 			assert := NewGomegaWithT(t)
 
 			dir, err := os.MkdirTemp("", "")
@@ -69,7 +106,7 @@ func TestMain(t *testing.T) {
 			output := gbytes.NewBuffer()
 			session, err := gexec.Start(exec.Command(path, "-dir", dir), output, output)
 			assert.Expect(err).NotTo(HaveOccurred())
-			assert.Eventually(session).Should(gexec.Exit(0))
+			assert.Eventually(session).Should(gexec.Exit(0), fmt.Sprintf("output: %s", output.Contents()))
 			assert.Expect(output).To(gbytes.Say(test.beforeVersion))
 
 			for filename, contents := range test.afterFiles {
@@ -83,7 +120,7 @@ func TestMain(t *testing.T) {
 				assert.Expect(err).NotTo(HaveOccurred())
 			}
 
-			output = gbytes.NewBuffer()
+			assert.Expect(output.Clear()).NotTo(HaveOccurred())
 			session, err = gexec.Start(exec.Command(path, "-dir", dir), output, output)
 			assert.Expect(err).NotTo(HaveOccurred())
 			assert.Eventually(session).Should(gexec.Exit(0))

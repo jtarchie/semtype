@@ -10,6 +10,7 @@ import (
 	"go/parser"
 	"go/token"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -25,6 +26,16 @@ type State struct {
 }
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+
+	err := execute()
+	if err != nil {
+		slog.Error("execute.errored", "err", err)
+		os.Exit(1)
+	}
+}
+
+func execute() error {
 	dir := flag.String("dir", "./", "directory to analyze")
 	stateFile := flag.String("state", "", "path to state file")
 	flag.Parse()
@@ -39,13 +50,13 @@ func main() {
 		if os.IsNotExist(err) {
 			previousState = State{Version: "0.0.0"}
 		} else {
-			log.Fatalf("failed to open state file: %v", err)
+			return fmt.Errorf("failed to open state file: %v", err)
 		}
 	} else {
 		defer file.Close()
 		decoder := gob.NewDecoder(file)
 		if err := decoder.Decode(&previousState); err != nil {
-			log.Fatalf("failed to decode state file: %v", err)
+			return fmt.Errorf("failed to decode state file: %v", err)
 		}
 	}
 
@@ -56,7 +67,7 @@ func main() {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, *dir, nil, parser.AllErrors)
 	if err != nil {
-		log.Fatalf("Failed to parse directory: %v", err)
+		return fmt.Errorf("Failed to parse directory: %v", err)
 	}
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Files {
@@ -72,8 +83,20 @@ func main() {
 								switch t := s.Type.(type) {
 								case *ast.StructType:
 									// Create new struct type without field details
+									exportedFields := []*ast.Field{}
+									for _, field := range t.Fields.List {
+										if field.Names[0].IsExported() {
+											exportedFields = append(exportedFields, field)
+										}
+									}
+
 									simplifiedType = &ast.StructType{
-										Fields: &ast.FieldList{},
+										Struct: t.Struct,
+										Fields: &ast.FieldList{
+											Opening: t.Fields.Opening,
+											List:    exportedFields,
+											Closing: t.Fields.Closing,
+										},
 									}
 								default:
 									simplifiedType = t
@@ -105,7 +128,7 @@ func main() {
 	major, minor, patch := 0, 0, 0
 	_, err = fmt.Sscanf(previousState.Version, "%d.%d.%d", &major, &minor, &patch)
 	if err != nil {
-		log.Fatalf("failed to parse version: %v", err)
+		return fmt.Errorf("failed to parse version: %v", err)
 	}
 
 	removed := false
@@ -156,7 +179,7 @@ bump:
 
 	file, err = os.Create(*stateFile)
 	if err != nil {
-		log.Fatalf("failed to create state file: %v", err)
+		return fmt.Errorf("failed to create state file: %v", err)
 	}
 	defer file.Close()
 
@@ -167,8 +190,9 @@ bump:
 
 	encoder := gob.NewEncoder(file)
 	if err := encoder.Encode(&state); err != nil {
-		log.Fatalf("failed to encode state file: %v", err)
+		return fmt.Errorf("failed to encode state file: %v", err)
 	}
 
 	fmt.Printf("%s\n", newVersion)
+	return nil
 }
