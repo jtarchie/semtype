@@ -170,5 +170,5 @@ bump:
 		log.Fatalf("failed to encode state file: %v", err)
 	}
 
-	fmt.Printf("New version: %s\n", newVersion)
+	fmt.Printf("%s\n", newVersion)
 }
