@@ -9,33 +9,75 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
 )
 
+// Exported holds the exported types and functions from a Go package
 type Exported struct {
 	Types     map[string]string
 	Functions map[string]string
 }
 
+// State represents the current state of the semantic versioning analysis
 type State struct {
 	Version  string
 	Exported Exported
 }
 
+// Version represents a semantic version
+type Version struct {
+	Major, Minor, Patch int
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 
-	err := execute()
-	if err != nil {
-		slog.Error("execute.errored", "err", err)
+	if err := run(); err != nil {
+		slog.Error("execution failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func execute() error {
+func run() error {
+	config, err := parseFlags()
+	if err != nil {
+		return fmt.Errorf("parsing flags: %w", err)
+	}
+
+	previousState, err := loadState(config.stateFile)
+	if err != nil {
+		return fmt.Errorf("loading state: %w", err)
+	}
+
+	currentExported, err := analyzePackage(config.dir)
+	if err != nil {
+		return fmt.Errorf("analyzing package: %w", err)
+	}
+
+	newVersion := calculateVersion(previousState, currentExported)
+
+	newState := State{
+		Version:  newVersion.String(),
+		Exported: currentExported,
+	}
+
+	if err := saveState(config.stateFile, newState); err != nil {
+		return fmt.Errorf("saving state: %w", err)
+	}
+
+	fmt.Println(newVersion.String())
+	return nil
+}
+
+// config holds the parsed command line flags
+type config struct {
+	dir       string
+	stateFile string
+}
+
+func parseFlags() (*config, error) {
 	dir := flag.String("dir", "./", "directory to analyze")
 	stateFile := flag.String("state", "", "path to state file")
 	flag.Parse()
@@ -44,165 +86,221 @@ func execute() error {
 		*stateFile = filepath.Join(*dir, "semtype.dat")
 	}
 
-	file, err := os.Open(*stateFile)
-	var previousState State
+	return &config{
+		dir:       *dir,
+		stateFile: *stateFile,
+	}, nil
+}
+
+func loadState(stateFile string) (State, error) {
+	file, err := os.Open(stateFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			previousState = State{Version: "0.0.0"}
-		} else {
-			return fmt.Errorf("failed to open state file: %v", err)
+			return State{Version: "0.0.0", Exported: Exported{
+				Types:     make(map[string]string),
+				Functions: make(map[string]string),
+			}}, nil
 		}
-	} else {
-		defer func() { _ = file.Close() }()
-		decoder := gob.NewDecoder(file)
-		if err := decoder.Decode(&previousState); err != nil {
-			return fmt.Errorf("failed to decode state file: %v", err)
+		return State{}, fmt.Errorf("opening state file: %w", err)
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			slog.Warn("failed to close state file", "error", closeErr)
 		}
+	}()
+
+	var state State
+	decoder := gob.NewDecoder(file)
+	if err := decoder.Decode(&state); err != nil {
+		return State{}, fmt.Errorf("decoding state file: %w", err)
 	}
 
+	return state, nil
+}
+
+func saveState(stateFile string, state State) error {
+	file, err := os.Create(stateFile)
+	if err != nil {
+		return fmt.Errorf("creating state file: %w", err)
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			slog.Warn("failed to close state file", "error", closeErr)
+		}
+	}()
+
+	encoder := gob.NewEncoder(file)
+	if err := encoder.Encode(&state); err != nil {
+		return fmt.Errorf("encoding state: %w", err)
+	}
+
+	return nil
+}
+
+func analyzePackage(dir string) (Exported, error) {
 	exported := Exported{
 		Types:     make(map[string]string),
 		Functions: make(map[string]string),
 	}
+
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, *dir, nil, parser.AllErrors)
+	pkgs, err := parser.ParseDir(fset, dir, nil, parser.ParseComments)
 	if err != nil {
-		return fmt.Errorf("failed to parse directory: %v", err)
+		return exported, fmt.Errorf("parsing directory: %w", err)
 	}
+
 	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				switch d := decl.(type) {
-				case *ast.GenDecl:
-					for _, spec := range d.Specs {
-						switch s := spec.(type) {
-						case *ast.TypeSpec:
-							if s.Name.IsExported() {
-								// Create a simplified version of the type
-								var simplifiedType ast.Node
-								switch t := s.Type.(type) {
-								case *ast.StructType:
-									// Create new struct type without field details
-									exportedFields := []*ast.Field{}
-									for _, field := range t.Fields.List {
-										if field.Names[0].IsExported() {
-											exportedFields = append(exportedFields, field)
-										}
-									}
+		if err := analyzePackageFiles(fset, pkg.Files, &exported); err != nil {
+			return exported, err
+		}
+	}
 
-									simplifiedType = &ast.StructType{
-										Struct: t.Struct,
-										Fields: &ast.FieldList{
-											Opening: t.Fields.Opening,
-											List:    exportedFields,
-											Closing: t.Fields.Closing,
-										},
-									}
-								default:
-									simplifiedType = t
-								}
+	return exported, nil
+}
 
-								printer := &bytes.Buffer{}
-								if err := format.Node(printer, fset, simplifiedType); err != nil {
-									log.Printf("Failed to format type %s: %v", s.Name.Name, err)
-									continue
-								}
-								exported.Types[s.Name.Name] = printer.String()
-							}
-						}
-					}
-				case *ast.FuncDecl:
-					if d.Name.IsExported() {
-						printer := &bytes.Buffer{}
-						if err := format.Node(printer, fset, d.Type); err != nil {
-							log.Printf("Failed to format type %s: %v", d.Name.Name, err)
-							continue
-						}
-						exported.Functions[d.Name.Name] = printer.String()
-					}
+func analyzePackageFiles(fset *token.FileSet, files map[string]*ast.File, exported *Exported) error {
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.GenDecl:
+				if err := analyzeGenDecl(fset, d, exported); err != nil {
+					return err
+				}
+			case *ast.FuncDecl:
+				if err := analyzeFuncDecl(fset, d, exported); err != nil {
+					return err
 				}
 			}
 		}
 	}
-
-	major, minor, patch := 0, 0, 0
-	_, err = fmt.Sscanf(previousState.Version, "%d.%d.%d", &major, &minor, &patch)
-	if err != nil {
-		return fmt.Errorf("failed to parse version: %v", err)
-	}
-
-	removed := false
-	added := false
-
-	if len(exported.Types) < len(previousState.Exported.Types) {
-		removed = true
-		goto bump
-	}
-
-	if len(exported.Functions) < len(previousState.Exported.Functions) {
-		removed = true
-		goto bump
-	}
-
-	for name, typ := range previousState.Exported.Types {
-		if currentType, ok := exported.Types[name]; !ok || currentType != typ {
-			removed = true
-			goto bump
-		}
-	}
-
-	for name, typ := range exported.Types {
-		if previousType, ok := previousState.Exported.Types[name]; !ok || previousType != typ {
-			added = true
-			goto bump
-		}
-	}
-
-	for name, typ := range previousState.Exported.Functions {
-		if currentFunc, ok := exported.Functions[name]; !ok || currentFunc != typ {
-			removed = true
-			goto bump
-		}
-	}
-
-	for name, typ := range exported.Functions {
-		if previousFunc, ok := previousState.Exported.Functions[name]; !ok || previousFunc != typ {
-			added = true
-			goto bump
-		}
-	}
-
-bump:
-
-	if removed {
-		major++
-		minor = 0
-		patch = 0
-	} else if added {
-		minor++
-		patch = 0
-	} else {
-		patch++
-	}
-
-	newVersion := fmt.Sprintf("%d.%d.%d", major, minor, patch)
-
-	file, err = os.Create(*stateFile)
-	if err != nil {
-		return fmt.Errorf("failed to create state file: %v", err)
-	}
-	defer func() { _ = file.Close() }()
-
-	state := State{
-		Version:  newVersion,
-		Exported: exported,
-	}
-
-	encoder := gob.NewEncoder(file)
-	if err := encoder.Encode(&state); err != nil {
-		return fmt.Errorf("failed to encode state file: %v", err)
-	}
-
-	fmt.Printf("%s\n", newVersion)
 	return nil
+}
+
+func analyzeGenDecl(fset *token.FileSet, d *ast.GenDecl, exported *Exported) error {
+	for _, spec := range d.Specs {
+		if typeSpec, ok := spec.(*ast.TypeSpec); ok && typeSpec.Name.IsExported() {
+			simplified := simplifyType(typeSpec.Type)
+			formatted, err := formatNode(fset, simplified)
+			if err != nil {
+				slog.Warn("failed to format type", "name", typeSpec.Name.Name, "error", err)
+				continue
+			}
+			exported.Types[typeSpec.Name.Name] = formatted
+		}
+	}
+	return nil
+}
+
+func analyzeFuncDecl(fset *token.FileSet, d *ast.FuncDecl, exported *Exported) error {
+	if !d.Name.IsExported() {
+		return nil
+	}
+
+	formatted, err := formatNode(fset, d.Type)
+	if err != nil {
+		slog.Warn("failed to format function", "name", d.Name.Name, "error", err)
+		return nil
+	}
+
+	exported.Functions[d.Name.Name] = formatted
+	return nil
+}
+
+func simplifyType(typeNode ast.Expr) ast.Node {
+	structType, ok := typeNode.(*ast.StructType)
+	if !ok {
+		return typeNode
+	}
+
+	// Only include exported fields in struct types
+	var exportedFields []*ast.Field
+	for _, field := range structType.Fields.List {
+		if len(field.Names) > 0 && field.Names[0].IsExported() {
+			exportedFields = append(exportedFields, field)
+		}
+	}
+
+	return &ast.StructType{
+		Struct: structType.Struct,
+		Fields: &ast.FieldList{
+			Opening: structType.Fields.Opening,
+			List:    exportedFields,
+			Closing: structType.Fields.Closing,
+		},
+	}
+}
+
+func formatNode(fset *token.FileSet, node ast.Node) (string, error) {
+	var buf bytes.Buffer
+	if err := format.Node(&buf, fset, node); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func calculateVersion(previousState State, currentExported Exported) Version {
+	previousVersion := parseVersion(previousState.Version)
+
+	hasBreaking := hasBreakingChanges(previousState.Exported, currentExported)
+	hasFeatures := hasNewFeatures(previousState.Exported, currentExported)
+
+	if hasBreaking {
+		return Version{Major: previousVersion.Major + 1, Minor: 0, Patch: 0}
+	}
+	if hasFeatures {
+		return Version{Major: previousVersion.Major, Minor: previousVersion.Minor + 1, Patch: 0}
+	}
+	return Version{Major: previousVersion.Major, Minor: previousVersion.Minor, Patch: previousVersion.Patch + 1}
+}
+
+func parseVersion(version string) Version {
+	var v Version
+	n, err := fmt.Sscanf(version, "%d.%d.%d", &v.Major, &v.Minor, &v.Patch)
+	if err != nil || n != 3 {
+		slog.Warn("failed to parse version, using default", "version", version, "error", err)
+		return Version{Major: 0, Minor: 0, Patch: 0}
+	}
+	return v
+}
+
+func (v Version) String() string {
+	return fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
+}
+
+func hasBreakingChanges(previous, current Exported) bool {
+	// Check for removed or changed types
+	for name, previousType := range previous.Types {
+		currentType, exists := current.Types[name]
+		if !exists || currentType != previousType {
+			return true
+		}
+	}
+
+	// Check for removed or changed functions
+	for name, previousFunc := range previous.Functions {
+		currentFunc, exists := current.Functions[name]
+		if !exists || currentFunc != previousFunc {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hasNewFeatures(previous, current Exported) bool {
+	// Check for new types
+	for name := range current.Types {
+		if _, exists := previous.Types[name]; !exists {
+			return true
+		}
+	}
+
+	// Check for new functions
+	for name := range current.Functions {
+		if _, exists := previous.Functions[name]; !exists {
+			return true
+		}
+	}
+
+	return false
 }
