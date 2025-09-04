@@ -53,7 +53,7 @@ func execute() error {
 			return fmt.Errorf("failed to open state file: %v", err)
 		}
 	} else {
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		decoder := gob.NewDecoder(file)
 		if err := decoder.Decode(&previousState); err != nil {
 			return fmt.Errorf("failed to decode state file: %v", err)
@@ -67,7 +67,7 @@ func execute() error {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, *dir, nil, parser.AllErrors)
 	if err != nil {
-		return fmt.Errorf("Failed to parse directory: %v", err)
+		return fmt.Errorf("failed to parse directory: %v", err)
 	}
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Files {
@@ -181,7 +181,7 @@ bump:
 	if err != nil {
 		return fmt.Errorf("failed to create state file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	state := State{
 		Version:  newVersion,
