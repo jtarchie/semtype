@@ -79,6 +79,95 @@ func TestMain(t *testing.T) {
 			},
 			afterVersion: "1.0.0",
 		},
+		// complex cases
+		{
+			name: "add exported function (minor)",
+			beforeFiles: map[string]string{
+				"test.go": "package main\n",
+			},
+			beforeVersion: "0.0.1",
+			afterFiles: map[string]string{
+				"test.go": "package main\nfunc Exported() {}\n",
+			},
+			afterVersion: "0.1.0",
+		},
+		{
+			name: "add unexported function (patch)",
+			beforeFiles: map[string]string{
+				"test.go": "package main\n",
+			},
+			beforeVersion: "0.0.1",
+			afterFiles: map[string]string{
+				"test.go": "package main\nfunc helper() {}\n",
+			},
+			afterVersion: "0.0.2",
+		},
+		{
+			name: "change exported function signature (major)",
+			beforeFiles: map[string]string{
+				"test.go": "package main\nfunc Exported(a int) {}\n",
+			},
+			beforeVersion: "0.1.0",
+			afterFiles: map[string]string{
+				"test.go": "package main\nfunc Exported(a int, b int) {}\n",
+			},
+			afterVersion: "1.0.0",
+		},
+		{
+			name: "remove exported function (major)",
+			beforeFiles: map[string]string{
+				"test.go": "package main\nfunc Exported() {}\n",
+			},
+			beforeVersion: "0.1.0",
+			afterFiles:    map[string]string{
+				// file removed entirely to simulate removal
+			},
+			afterVersion: "1.0.0",
+		},
+		{
+			name: "change type of exported field (major)",
+			beforeFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{Name string}\n",
+			},
+			beforeVersion: "0.1.0",
+			afterFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{Name int}\n",
+			},
+			afterVersion: "1.0.0",
+		},
+		{
+			name: "add exported method to exported type (minor)",
+			beforeFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{}\n",
+			},
+			beforeVersion: "0.1.0",
+			afterFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{}\nfunc (t Test) Exported() {}\n",
+			},
+			afterVersion: "0.2.0",
+		},
+		{
+			name: "remove exported method (major)",
+			beforeFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{}\nfunc (t Test) Exported() {}\n",
+			},
+			beforeVersion: "0.1.0",
+			afterFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{}\n",
+			},
+			afterVersion: "1.0.0",
+		},
+		{
+			name: "multiple changes: add unexported field + add exported function -> minor",
+			beforeFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{}\n",
+			},
+			beforeVersion: "0.1.0",
+			afterFiles: map[string]string{
+				"test.go": "package main\ntype Test struct{age int}\nfunc Exported() {}\n",
+			},
+			afterVersion: "0.2.0",
+		},
 	}
 
 	path, err := gexec.Build("github.com/jtarchie/semtype")
@@ -118,6 +207,15 @@ func TestMain(t *testing.T) {
 
 				err = os.WriteFile(fullPath, []byte(contents), 0644)
 				assert.Expect(err).NotTo(HaveOccurred())
+			}
+
+			// remove any files that were in beforeFiles but not in afterFiles to simulate removal
+			for filename := range test.beforeFiles {
+				if _, ok := test.afterFiles[filename]; !ok {
+					fullPath := filepath.Join(dir, filename)
+					err := os.Remove(fullPath)
+					assert.Expect(err).NotTo(HaveOccurred())
+				}
 			}
 
 			assert.Expect(output.Clear()).NotTo(HaveOccurred())

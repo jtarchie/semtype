@@ -134,6 +134,16 @@ func execute() error {
 	removed := false
 	added := false
 
+	if len(exported.Types) < len(previousState.Exported.Types) {
+		removed = true
+		goto bump
+	}
+
+	if len(exported.Functions) < len(previousState.Exported.Functions) {
+		removed = true
+		goto bump
+	}
+
 	for name, typ := range previousState.Exported.Types {
 		if currentType, ok := exported.Types[name]; !ok || currentType != typ {
 			removed = true
